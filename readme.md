@@ -1,1 +1,1 @@
-hello, folks
+python ppo.py --game_name kuhn_poker --num_updates 30 --rollout_steps 512

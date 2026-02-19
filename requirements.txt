@@ -1,0 +1,7 @@
+numpy
+torch
+open_spiel
+tqdm
+matplotlib
+pandas
+scipy
