@@ -1,49 +1,80 @@
-# ================================
+## 🧑‍💻 Team Git Workflow (Simple)
 
-# Simple Team Git Workflow
+Follow these steps to work on your own branch safely.
 
-# ================================
+---
 
-# 1️⃣ Go to your repo folder
+### 1️⃣ Go to the repository
 
+```bash
 cd GTBench
+```
 
-# 2️⃣ Make sure you are on YOUR branch
+---
 
+### 2️⃣ Check your branch
+
+```bash
 git branch
+```
 
-# If not, switch:
+If you are not on your branch:
 
-git checkout suki     # (or varsha / vaikunth)
+```bash
+git checkout suki     # or varsha / vaikunth
+```
 
-# 3️⃣ Get latest updates from remote
+---
 
+### 3️⃣ Pull latest updates
+
+```bash
 git pull origin suki
+```
 
-# 4️⃣ Do your work (edit files)
+---
 
-# 5️⃣ Stage changes
+### 4️⃣ Do your work
 
+Edit / add files.
+
+---
+
+### 5️⃣ Stage changes
+
+```bash
 git add .
+```
 
-# 6️⃣ Commit
+---
 
+### 6️⃣ Commit
+
+```bash
 git commit -m "Your message"
+```
 
-# 7️⃣ Push to YOUR branch only
+---
 
+### 7️⃣ Push to your branch
+
+```bash
 git push origin suki
+```
 
-# ================================
+---
 
-# Notes
+## ⚠️ Rules
 
-# ================================
+* Only push to **your branch**
+* Do NOT push to `main` / `master`
+* Do NOT modify other branches
+* Always `pull` before `push`
 
-# - Only push to YOUR branch
+---
 
-# - Do NOT push to main/master
+✅ Example branches:
 
-# - Do NOT modify other branches
-
-# - Always pull before push
+* `suki`
+* `varsha`
+* `vaikunth`
