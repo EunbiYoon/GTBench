@@ -7,21 +7,17 @@ Follow these steps to work on your own branch safely.
 ### 1️⃣ Go to the repository
 
 ```bash
-cd GTBench
+git clone https://github.com/EunbiYoon/GTBench.git
 ```
 
 ---
 
-### 2️⃣ Check your branch
+### 2️⃣ Access to your branch
 
 ```bash
-git branch
-```
-
-If you are not on your branch:
-
-```bash
-git checkout suki     # or varsha / vaikunth
+git fetch origin        # Get all remote branches
+git branch -a           # Check all branches
+git checkout eunbi     # Move to YOUR branch
 ```
 
 ---
@@ -29,7 +25,7 @@ git checkout suki     # or varsha / vaikunth
 ### 3️⃣ Pull latest updates
 
 ```bash
-git pull origin suki
+git pull origin eunbi
 ```
 
 ---
@@ -72,9 +68,3 @@ git push origin suki
 * Always `pull` before `push`
 
 ---
-
-✅ Example branches:
-
-* `suki`
-* `varsha`
-* `vaikunth`
