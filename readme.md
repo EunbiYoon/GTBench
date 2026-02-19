@@ -55,7 +55,7 @@ git commit -m "Your message"
 ### 7️⃣ Push to your branch
 
 ```bash
-git push origin suki
+git push origin eunbi
 ```
 
 ---
