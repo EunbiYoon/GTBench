@@ -124,8 +124,8 @@ def main():
     # 8) Plot learning curve
     # -------------------------------------------------
     plt.figure()
-    plt.plot(history_steps, history_ev_p0, label="EV PPO as P1 vs CFR")
-    plt.plot(history_steps, history_ev_p1, label="EV PPO as P2 vs CFR")
+    plt.plot(history_steps, history_ev_p0, label="EV PPO as P0 vs CFR")
+    plt.plot(history_steps, history_ev_p1, label="EV PPO as P1 vs CFR")
     plt.xlabel("Environment steps")
     plt.ylabel("Expected Value (MC)")
     plt.title("PPO Learning Curve vs Fixed CFR")
