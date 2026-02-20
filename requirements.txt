@@ -5,3 +5,8 @@ tqdm
 matplotlib
 pandas
 scipy
+numpy
+torch
+open_spiel
+matplotlib
+pokerkit
