@@ -1,16 +1,58 @@
 # train.py
 # PPO training utilities: rollout collection + PPO update.
+# + Episode trajectory pretty-print (every N episodes)
 
+from __future__ import annotations
+
+from typing import List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
 
 from config import (
-    ROLLOUT_STEPS, PRINT_EVERY_EPISODES,
-    GAMMA, LAMBDA, CLIP_EPS, VF_COEF, ENT_COEF, MAX_GRAD_NORM,
-    EPOCHS, MINIBATCH
+    ROLLOUT_STEPS,
+    PRINT_EVERY_EPISODES,
+    GAMMA,
+    LAMBDA,
+    CLIP_EPS,
+    VF_COEF,
+    ENT_COEF,
+    MAX_GRAD_NORM,
+    EPOCHS,
+    MINIBATCH,
+    SHOW_TRAJ,
+    SHOW_TRAJ_EVERY_EPISODES,
+    MAX_TRAJ_STEPS_PRINT,
 )
+
 from agents import ActorCritic, masked_softmax
+
+
+# ---------- Trajectory pretty helpers (tic-tac-toe) ----------
+def action_to_rc(action: int) -> Tuple[int, int]:
+    return action // 3, action % 3
+
+
+def pretty_board_from_info_state(info_state_vec: np.ndarray) -> str:
+    """
+    Common OpenSpiel tic_tac_toe information_state_tensor encoding:
+      [X plane (9), O plane (9)]  => total 18
+    """
+    v = np.asarray(info_state_vec, dtype=np.float32).reshape(-1)
+    if v.size >= 18:
+        x = v[:9]
+        o = v[9:18]
+        cells = []
+        for i in range(9):
+            if x[i] > 0.5:
+                cells.append("X")
+            elif o[i] > 0.5:
+                cells.append("O")
+            else:
+                cells.append(".")
+        rows = [" ".join(cells[r * 3 : (r + 1) * 3]) for r in range(3)]
+        return "\n".join(rows)
+    return "<board unavailable>"
 
 
 def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_counter_ref):
@@ -22,12 +64,18 @@ def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_
       act      : [T]
       mask     : [T, act_dim]
       logp_old : [T]
-      ret      : [T]  (GAE returns)
-      adv      : [T]  (normalized advantages)
+      ret      : [T] (GAE returns)
+      adv      : [T] (normalized advantages)
     """
     obs_list, act_list, mask_list = [], [], []
     logp_list, val_list = [], []
     rew_list, done_list = [], []
+
+    # Per-episode buffers for printing one full trajectory
+    ep_actions: List[int] = []
+    ep_players: List[int] = []
+    ep_rewards: List[float] = []
+    ep_states: List[np.ndarray] = []
 
     ts = env.reset()
     steps = 0
@@ -36,12 +84,35 @@ def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_
         # If an episode ended, count it and start a new one.
         if ts.last():
             episode_counter_ref[0] += 1
-            if episode_counter_ref[0] % PRINT_EVERY_EPISODES == 0:
-                print(f"[progress] episodes={episode_counter_ref[0]}")
+            ep = episode_counter_ref[0]
+
+            if ep % PRINT_EVERY_EPISODES == 0:
+                print(f"[progress] episodes={ep}")
+
+            if SHOW_TRAJ and (ep % SHOW_TRAJ_EVERY_EPISODES == 0) and len(ep_actions) > 0:
+                print(f"\n===== Trajectory (episode {ep}) =====")
+                T = min(len(ep_actions), MAX_TRAJ_STEPS_PRINT)
+                for t in range(T):
+                    a = ep_actions[t]
+                    p = ep_players[t]
+                    r = ep_rewards[t]
+                    svec = ep_states[t]
+                    rr, cc = action_to_rc(a)
+                    print(f"\n[t={t}] player={p} action={a} (row={rr}, col={cc}) reward={r:+.1f}")
+                    print(pretty_board_from_info_state(svec))
+                if len(ep_actions) > T:
+                    print(f"\n... (truncated, total steps in episode: {len(ep_actions)})")
+                print("====================================\n")
+
+            ep_actions.clear()
+            ep_players.clear()
+            ep_rewards.clear()
+            ep_states.clear()
+
             ts = env.reset()
             continue
 
-        # Player to act (0 or 1). For tic_tac_toe, no chance nodes expected.
+        # Player to act (0 or 1).
         p = int(ts.observations["current_player"])
         if p < 0:
             ts = env.reset()
@@ -75,12 +146,12 @@ def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_
         action = int(a.item())
         next_ts = env.step([action])
 
-        # Reward for player p (typically only non-zero at terminal in tic_tac_toe)
+        # Reward for player p
         r = 0.0
         if hasattr(next_ts, "rewards") and 0 <= p < len(next_ts.rewards):
             r = float(next_ts.rewards[p])
 
-        # Store transition
+        # Store transition for PPO
         obs_list.append(obs_t)
         mask_list.append(mask_t)
         act_list.append(torch.tensor(action, device=device, dtype=torch.long))
@@ -88,6 +159,12 @@ def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_
         val_list.append(v.squeeze(0))
         rew_list.append(torch.tensor(r, device=device, dtype=torch.float32))
         done_list.append(torch.tensor(float(next_ts.last()), device=device, dtype=torch.float32))
+
+        # Store for episode trajectory printing
+        ep_actions.append(action)
+        ep_players.append(p)
+        ep_rewards.append(r)
+        ep_states.append(obs.copy())
 
         ts = next_ts
         steps += 1
@@ -133,9 +210,7 @@ def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_
 
 
 def ppo_update(model: ActorCritic, optimizer, batch):
-    """
-    PPO clipped objective update.
-    """
+    """PPO clipped objective update."""
     obs, act, mask, logp_old, ret, adv = batch
     T = obs.shape[0]
     idxs = np.arange(T)
@@ -143,7 +218,7 @@ def ppo_update(model: ActorCritic, optimizer, batch):
     for _ in range(EPOCHS):
         np.random.shuffle(idxs)
         for start in range(0, T, MINIBATCH):
-            mb = idxs[start:start + MINIBATCH]
+            mb = idxs[start : start + MINIBATCH]
 
             logits, v = model(obs[mb])
             probs = masked_softmax(logits, mask[mb])
