@@ -17,7 +17,9 @@ from config import (
     LOG_CSV, PLOT_PNG
 )
 from agents import ActorCritic
-from train_eval import collect_rollout, ppo_update, build_cfr_average_policy, eval_mc_vs_fixed
+from train import collect_rollout, ppo_update
+from cfr_opponent import build_cfr_average_policy
+from eval import eval_mc_vs_fixed
 
 
 def set_seed(seed: int):
