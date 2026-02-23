@@ -1,94 +1,124 @@
 # eval.py
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Tuple, List
 
 import numpy as np
 import torch
-import pyspiel
 
-from open_spiel.python import policy as policy_lib
-from open_spiel.python.algorithms import expected_game_score
-from open_spiel.python.algorithms import exploitability
-
-from agents import masked_softmax, ActorCritic
+from agents import masked_softmax
+from config import ACT_DIM, EVAL_EPISODES, REGRET_ROOT_SIMS, REGRET_ROLLOUT_HORIZON
 
 
-class TorchPolicy(policy_lib.Policy):
-    """Wrap your Torch ActorCritic into an OpenSpiel Policy interface."""
-    def __init__(self, game, model: ActorCritic, device: str):
-        super().__init__(game, list(range(game.num_players())))
-        self._model = model
-        self._device = device
-        self._act_dim = game.num_distinct_actions()
+def _policy_action(model, obs: np.ndarray, legal: List[int], device: str, sample: bool = True) -> int:
+    obs_t = torch.from_numpy(obs).float().to(device).unsqueeze(0)
+    mask = torch.zeros((1, ACT_DIM), dtype=torch.float32, device=device)
+    if len(legal) > 0:
+        mask[0, torch.tensor(legal, dtype=torch.long, device=device)] = 1.0
 
-    def action_probabilities(self, state, player_id=None):
-        if state.is_chance_node():
-            return dict(state.chance_outcomes())
-
-        if player_id is None:
-            player_id = state.current_player()
-
-        legal = state.legal_actions(player_id)
-        if not legal:
-            return {}
-
-        obs = np.asarray(state.information_state_tensor(player_id), dtype=np.float32).reshape(-1)
-        mask = np.zeros((self._act_dim,), dtype=np.float32)
-        for a in legal:
-            if 0 <= a < self._act_dim:
-                mask[a] = 1.0
-
-        obs_t = torch.from_numpy(obs).to(self._device).unsqueeze(0)
-        mask_t = torch.from_numpy(mask).to(self._device).unsqueeze(0)
-
-        with torch.no_grad():
-            logits, _ = self._model(obs_t)
-            probs = masked_softmax(logits, mask_t).squeeze(0)
-
-        # normalize on legal actions
-        out = {a: float(probs[a].item()) for a in legal}
-        s = sum(out.values())
-        if s <= 0:
-            uni = 1.0 / len(legal)
-            return {a: uni for a in legal}
-        return {a: p / s for a, p in out.items()}
+    with torch.no_grad():
+        logits, _ = model(obs_t)
+        probs = masked_softmax(logits, mask)  # [1, A]
+        if sample:
+            dist = torch.distributions.Categorical(probs=probs)
+            return int(dist.sample().item())
+        else:
+            return int(torch.argmax(probs, dim=-1).item())
 
 
-class TwoPlayerJointPolicy(policy_lib.Policy):
-    """Joint policy where each player can have a different underlying policy."""
-    def __init__(self, game, p0_policy, p1_policy):
-        super().__init__(game, list(range(game.num_players())))
-        self._p = {0: p0_policy, 1: p1_policy}
-
-    def action_probabilities(self, state, player_id=None):
-        if state.is_chance_node():
-            return dict(state.chance_outcomes())
-        if player_id is None:
-            player_id = state.current_player()
-        return self._p[player_id].action_probabilities(state, player_id)
-
-
-def eval_reward_and_regret_vs_fixed(game_name: str, model: ActorCritic, cfr_policy, device: str):
+def _rollout_episode(env, model, device: str, starting_player: int) -> int:
     """
-    Returns:
-      reward_p0: E[return for PPO] when PPO is player 0 vs CFR player 1
-      reward_p1: E[return for PPO] when PPO is player 1 vs CFR player 0
-      regret_p0: best_response_value - on_policy_value for PPO (player 0) vs CFR
-      regret_p1: best_response_value - on_policy_value for PPO (player 1) vs CFR
+    Returns outcome: +1 if X wins, -1 if O wins, 0 draw.
     """
-    game = pyspiel.load_game(game_name)
-    root = game.new_initial_state()
+    env.reset(starting_player=starting_player)
+    while True:
+        legal = env.legal_actions()
+        a = _policy_action(model, env._get_obs(), legal, device, sample=True)
+        step = env.step(a)
+        if step.done:
+            return int(step.info.get("winner", 0))
 
-    ppo_policy = TorchPolicy(game, model, device)
 
-    # Seating 1: PPO as P0, CFR as P1
-    joint_01 = TwoPlayerJointPolicy(game, ppo_policy, cfr_policy)
-    reward_p0 = expected_game_score.policy_value(root, [ppo_policy, cfr_policy])[0]
-    br_info_p0 = exploitability.best_response(game, joint_01, player_id=0)
-    regret_p0 = br_info_p0["nash_conv"]  # == best_response_value - on_policy_value
+def eval_reward_and_regret(env_cls, model, device: str) -> Tuple[float, float, float, float]:
+    """
+    reward_p0: average outcome when policy plays as X (starting_player=+1)
+    reward_p1: average outcome when policy plays as O (starting_player=-1)
+    regret_p0/regret_p1: root-only best-action improvement (approx regret)
+      - For seat X: choose best first move by MC, then follow policy
+      - For seat O: same, but starting_player=-1
+    """
+    # -------- reward (policy value) --------
+    outcomes_x = []
+    outcomes_o = []
+    for _ in range(EVAL_EPISODES):
+        env = env_cls()
+        outcomes_x.append(_rollout_episode(env, model, device, starting_player=+1))
+        env = env_cls()
+        outcomes_o.append(_rollout_episode(env, model, device, starting_player=-1))
 
-    # Seating 2: CFR as P0, PPO as P1
-    joint_10 = TwoPlayerJointPolicy(game, cfr_policy, ppo_policy)
-    reward_p1 = expected_game_score.policy_value(root, [cfr_policy, ppo_policy])[1]
-    br_info_p1 = exploitability.best_response(game, joint_10, player_id=1)
-    regret_p1 = br_info_p1["nash_conv"]
+    # outcome is winner (+1/-1/0), reward for X seat is that outcome
+    reward_p0 = float(np.mean(outcomes_x))
+    reward_p1 = float(np.mean(outcomes_o))  # this is still winner sign; interpret separately if you want
 
-    return float(reward_p0), float(reward_p1), float(regret_p0), float(regret_p1)
+    # -------- regret (root-only best action improvement) --------
+    regret_p0 = _root_only_regret(env_cls, model, device, starting_player=+1)
+    regret_p1 = _root_only_regret(env_cls, model, device, starting_player=-1)
+
+    return reward_p0, reward_p1, float(regret_p0), float(regret_p1)
+
+
+def _simulate_from_state(env, model, device: str, horizon: int) -> int:
+    """
+    Simulate (policy vs itself) until done or horizon.
+    Returns winner sign (+1/-1/0).
+    """
+    for _ in range(horizon):
+        legal = env.legal_actions()
+        if len(legal) == 0:
+            break
+        a = _policy_action(model, env._get_obs(), legal, device, sample=True)
+        step = env.step(a)
+        if step.done:
+            return int(step.info.get("winner", 0))
+    return int(getattr(env, "winner", 0))
+
+
+def _root_only_regret(env_cls, model, device: str, starting_player: int) -> float:
+    """
+    Approx regret = V(best first move) - V(policy first move)
+    where value is expected winner sign (+1/-1/0) under policy afterwards.
+    """
+    env0 = env_cls()
+    obs0 = env0.reset(starting_player=starting_player)
+    legal0 = env0.legal_actions()
+
+    if len(legal0) == 0:
+        return 0.0
+
+    # Baseline: policy chooses first move (sample) then follow policy
+    base_vals = []
+    for _ in range(REGRET_ROOT_SIMS):
+        env = env_cls()
+        env.reset(starting_player=starting_player)
+        a0 = _policy_action(model, env._get_obs(), env.legal_actions(), device, sample=True)
+        env.step(a0)
+        w = _simulate_from_state(env, model, device, REGRET_ROLLOUT_HORIZON)
+        base_vals.append(w)
+    v_policy = float(np.mean(base_vals))
+
+    # Best first move by MC: try every legal action, estimate continuation value
+    best_v = -1e9
+    for a in legal0:
+        vals = []
+        for _ in range(REGRET_ROOT_SIMS):
+            env = env_cls()
+            env.reset(starting_player=starting_player)
+            env.step(a)
+            w = _simulate_from_state(env, model, device, REGRET_ROLLOUT_HORIZON)
+            vals.append(w)
+        v = float(np.mean(vals))
+        if v > best_v:
+            best_v = v
+
+    return max(0.0, best_v - v_policy)

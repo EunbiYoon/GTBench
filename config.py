@@ -1,39 +1,33 @@
 # config.py
-# Centralized experiment configuration (edit only here).
 
-GAME_NAME = "tic_tac_toe"
+# Environment
+BOARD_N = 4
+ACT_DIM = BOARD_N * BOARD_N
+OBS_DIM = ACT_DIM + 1  # 16 cells + current player
+
+# Training
 SEED = 0
-DEVICE = "cpu"
+DEVICE = "cpu"  # "cuda" if available
 
-# Model
-HIDDEN = 64
+NUM_UPDATES = 2000
+ROLLOUT_STEPS = 2048
 
-# PPO / GAE
-GAMMA = 0.99
-LAMBDA = 0.95
-CLIP_EPS = 0.2
-VF_COEF = 0.5
-ENT_COEF = 0.01
 LR = 3e-4
+GAMMA = 0.99
+GAE_LAMBDA = 0.95
+
+CLIP_EPS = 0.2
+ENT_COEF = 0.01
+VF_COEF = 0.5
+
+PPO_EPOCHS = 4
+MINIBATCH_SIZE = 256
 MAX_GRAD_NORM = 0.5
 
-# Training schedule (FAST)
-ROLLOUT_STEPS = 128        # was 512
-NUM_UPDATES = 30           # was 800
-EPOCHS = 1                 # was 2
-MINIBATCH = 128            # was 256
+# Evaluation / logging
+EVAL_EVERY_UPDATES = 50
+EVAL_EPISODES = 200          # policy value MC eval episodes
+REGRET_ROOT_SIMS = 200       # sims per action for root-only best-action search
+REGRET_ROLLOUT_HORIZON = 16  # max plies to simulate (game ends <=16)
 
-# Opponent + evaluation (FAST)
-CFR_ITERS = 200            # was 50 (tictactoe는 200 정도면 충분히 강함)
-EVAL_EVERY_UPDATES = 10    # was 50
-EVAL_GAMES = 200           # was 1000 (MC eval이 시간 많이 잡아먹음)
-
-# Logging / plotting
-PRINT_EVERY_EPISODES = 1000
-LOG_CSV = "ppo_log.csv"
-PLOT_PNG = "ppo_learning_curve.png"
-
-# Trajectory debug view
-SHOW_TRAJ = True
-SHOW_TRAJ_EVERY_EPISODES = 1000
-MAX_TRAJ_STEPS_PRINT = 20
+LOG_CSV = "train_log.csv"

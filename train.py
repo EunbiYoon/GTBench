@@ -1,248 +1,184 @@
 # train.py
-# PPO training utilities: rollout collection + PPO update.
-# + Episode trajectory pretty-print (every N episodes)
-
 from __future__ import annotations
 
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Dict, Any, List
+
 import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 
+from agents import masked_softmax
 from config import (
-    ROLLOUT_STEPS,
-    PRINT_EVERY_EPISODES,
+    ACT_DIM,
     GAMMA,
-    LAMBDA,
+    GAE_LAMBDA,
     CLIP_EPS,
-    VF_COEF,
     ENT_COEF,
+    VF_COEF,
+    PPO_EPOCHS,
+    MINIBATCH_SIZE,
     MAX_GRAD_NORM,
-    EPOCHS,
-    MINIBATCH,
-    SHOW_TRAJ,
-    SHOW_TRAJ_EVERY_EPISODES,
-    MAX_TRAJ_STEPS_PRINT,
 )
 
-from agents import ActorCritic, masked_softmax
+
+@dataclass
+class RolloutBatch:
+    obs: torch.Tensor        # [T, obs_dim]
+    actions: torch.Tensor    # [T]
+    logp: torch.Tensor       # [T]
+    values: torch.Tensor     # [T]
+    rewards: torch.Tensor    # [T]
+    dones: torch.Tensor      # [T]
+    players: torch.Tensor    # [T] player who acted (+1 X / -1 O)
 
 
-# ---------- Trajectory pretty helpers (tic-tac-toe) ----------
-def action_to_rc(action: int) -> Tuple[int, int]:
-    return action // 3, action % 3
+def _legal_mask(legal_actions: List[int], act_dim: int, device: str) -> torch.Tensor:
+    m = torch.zeros((act_dim,), dtype=torch.float32, device=device)
+    if len(legal_actions) > 0:
+        m[torch.tensor(legal_actions, dtype=torch.long, device=device)] = 1.0
+    return m
 
 
-def pretty_board_from_info_state(info_state_vec: np.ndarray) -> str:
+def collect_rollout(env, model, act_dim: int, device: str, episode_counter_ref: List[int],
+                    debug_print_every_episode: int = 0) -> RolloutBatch:
     """
-    Common OpenSpiel tic_tac_toe information_state_tensor encoding:
-      [X plane (9), O plane (9)]  => total 18
+    Collect ROLLOUT_STEPS transitions in self-play.
+    Reward returned by env is for the player who JUST moved (before switching turns).
+    We store `player` and later convert terminal outcome into per-step rewards for both players.
     """
-    v = np.asarray(info_state_vec, dtype=np.float32).reshape(-1)
-    if v.size >= 18:
-        x = v[:9]
-        o = v[9:18]
-        cells = []
-        for i in range(9):
-            if x[i] > 0.5:
-                cells.append("X")
-            elif o[i] > 0.5:
-                cells.append("O")
-            else:
-                cells.append(".")
-        rows = [" ".join(cells[r * 3 : (r + 1) * 3]) for r in range(3)]
-        return "\n".join(rows)
-    return "<board unavailable>"
+    from config import ROLLOUT_STEPS  # avoid circular import
 
+    obs_buf, act_buf, logp_buf, val_buf, rew_buf, done_buf, ply_buf = [], [], [], [], [], [], []
 
-def collect_rollout(env, model: ActorCritic, act_dim: int, device: str, episode_counter_ref):
-    """
-    Collect on-policy transitions using self-play in rl_environment.
+    obs = env.reset(starting_player=1)
+    ep_index = 0
 
-    Returns tensors of length ROLLOUT_STEPS:
-      obs      : [T, obs_dim]
-      act      : [T]
-      mask     : [T, act_dim]
-      logp_old : [T]
-      ret      : [T] (GAE returns)
-      adv      : [T] (normalized advantages)
-    """
-    obs_list, act_list, mask_list = [], [], []
-    logp_list, val_list = [], []
-    rew_list, done_list = [], []
+    for t in range(ROLLOUT_STEPS):
+        player = env.current_player
+        legal = env.legal_actions()
+        if len(legal) == 0:
+            # shouldn't happen unless done; reset
+            obs = env.reset(starting_player=1)
+            player = env.current_player
+            legal = env.legal_actions()
 
-    # Per-episode buffers for printing one full trajectory
-    ep_actions: List[int] = []
-    ep_players: List[int] = []
-    ep_rewards: List[float] = []
-    ep_states: List[np.ndarray] = []
+        obs_t = torch.from_numpy(obs).float().to(device).unsqueeze(0)  # [1, obs_dim]
+        mask_t = _legal_mask(legal, act_dim, device).unsqueeze(0)      # [1, act_dim]
 
-    ts = env.reset()
-    steps = 0
-
-    while steps < ROLLOUT_STEPS:
-        # If an episode ended, count it and start a new one.
-        if ts.last():
-            episode_counter_ref[0] += 1
-            ep = episode_counter_ref[0]
-
-            if ep % PRINT_EVERY_EPISODES == 0:
-                print(f"[progress] episodes={ep}")
-
-            if SHOW_TRAJ and (ep % SHOW_TRAJ_EVERY_EPISODES == 0) and len(ep_actions) > 0:
-                print(f"\n===== Trajectory (episode {ep}) =====")
-                T = min(len(ep_actions), MAX_TRAJ_STEPS_PRINT)
-                for t in range(T):
-                    a = ep_actions[t]
-                    p = ep_players[t]
-                    r = ep_rewards[t]
-                    svec = ep_states[t]
-                    rr, cc = action_to_rc(a)
-                    print(f"\n[t={t}] player={p} action={a} (row={rr}, col={cc}) reward={r:+.1f}")
-                    print(pretty_board_from_info_state(svec))
-                if len(ep_actions) > T:
-                    print(f"\n... (truncated, total steps in episode: {len(ep_actions)})")
-                print("====================================\n")
-
-            ep_actions.clear()
-            ep_players.clear()
-            ep_rewards.clear()
-            ep_states.clear()
-
-            ts = env.reset()
-            continue
-
-        # Player to act (0 or 1).
-        p = int(ts.observations["current_player"])
-        if p < 0:
-            ts = env.reset()
-            continue
-
-        # Observation for current player + legal action mask
-        obs = np.asarray(ts.observations["info_state"][p], dtype=np.float32).reshape(-1)
-        legal = ts.observations["legal_actions"][p]
-
-        mask = np.zeros((act_dim,), dtype=np.float32)
-        for a in legal:
-            if 0 <= a < act_dim:
-                mask[a] = 1.0
-
-        obs_t = torch.from_numpy(obs).to(device)
-        mask_t = torch.from_numpy(mask).to(device)
-
-        # Sample action from policy pi(a|s) for on-policy learning
         with torch.no_grad():
-            logits, v = model(obs_t.unsqueeze(0))
-            probs = masked_softmax(logits, mask_t.unsqueeze(0))
-
-            # Safety: if mask is all-zero, fall back to uniform
-            if torch.all(mask_t <= 0):
-                probs = torch.full_like(probs, 1.0 / probs.shape[-1])
-
+            logits, value = model(obs_t)
+            probs = masked_softmax(logits, mask_t)  # [1, A]
             dist = torch.distributions.Categorical(probs=probs)
-            a = dist.sample()
-            logp = dist.log_prob(a)
+            action = dist.sample()                 # [1]
+            logp = dist.log_prob(action)           # [1]
 
-        action = int(a.item())
-        next_ts = env.step([action])
+        a = int(action.item())
+        step = env.step(a)
 
-        # Reward for player p
-        r = 0.0
-        if hasattr(next_ts, "rewards") and 0 <= p < len(next_ts.rewards):
-            r = float(next_ts.rewards[p])
+        # store transition
+        obs_buf.append(obs.copy())
+        act_buf.append(a)
+        logp_buf.append(float(logp.item()))
+        val_buf.append(float(value.item()))
+        rew_buf.append(float(step.reward))         # reward for the acting player
+        done_buf.append(1.0 if step.done else 0.0)
+        ply_buf.append(int(player))
 
-        # Store transition for PPO
-        obs_list.append(obs_t)
-        mask_list.append(mask_t)
-        act_list.append(torch.tensor(action, device=device, dtype=torch.long))
-        logp_list.append(logp.squeeze(0))
-        val_list.append(v.squeeze(0))
-        rew_list.append(torch.tensor(r, device=device, dtype=torch.float32))
-        done_list.append(torch.tensor(float(next_ts.last()), device=device, dtype=torch.float32))
+        obs = step.observation
 
-        # Store for episode trajectory printing
-        ep_actions.append(action)
-        ep_players.append(p)
-        ep_rewards.append(r)
-        ep_states.append(obs.copy())
+        if step.done:
+            episode_counter_ref[0] += 1
+            ep_index += 1
 
-        ts = next_ts
-        steps += 1
+            if debug_print_every_episode > 0 and (episode_counter_ref[0] % debug_print_every_episode == 0):
+                print("\n=== Episode end ===")
+                print(f"winner={step.info.get('winner')}, reason={step.info.get('reason')}")
+                print(env.render(as_matrix=True))
+                print("===================\n")
 
-    # Bootstrap value for last state (needed for GAE)
-    with torch.no_grad():
-        if ts.last():
-            v_last = torch.zeros((), device=device)
-        else:
-            try:
-                p_last = int(ts.observations["current_player"])
-                obs_last = np.asarray(ts.observations["info_state"][p_last], dtype=np.float32).reshape(-1)
-                obs_last_t = torch.from_numpy(obs_last).to(device)
-                _, v_last_b = model(obs_last_t.unsqueeze(0))
-                v_last = v_last_b.squeeze(0).squeeze(0)
-            except Exception:
-                v_last = torch.zeros((), device=device)
+            obs = env.reset(starting_player=1)
 
-    # Stack lists into tensors
-    obs = torch.stack(obs_list)
-    mask = torch.stack(mask_list)
-    act = torch.stack(act_list)
-    logp_old = torch.stack(logp_list)
-    val_old = torch.stack(val_list)
-    rew = torch.stack(rew_list)
-    done = torch.stack(done_list)
+    # convert to tensors
+    obs_t = torch.tensor(np.array(obs_buf), dtype=torch.float32, device=device)
+    actions_t = torch.tensor(act_buf, dtype=torch.long, device=device)
+    logp_t = torch.tensor(logp_buf, dtype=torch.float32, device=device)
+    values_t = torch.tensor(val_buf, dtype=torch.float32, device=device)
+    rewards_t = torch.tensor(rew_buf, dtype=torch.float32, device=device)
+    dones_t = torch.tensor(done_buf, dtype=torch.float32, device=device)
+    players_t = torch.tensor(ply_buf, dtype=torch.int64, device=device)
 
-    # ----- GAE -----
-    adv = torch.zeros_like(rew)
-    last_gae = torch.zeros((), device=device)
+    return RolloutBatch(obs_t, actions_t, logp_t, values_t, rewards_t, dones_t, players_t)
 
-    for t in reversed(range(ROLLOUT_STEPS)):
-        nonterminal = 1.0 - done[t]
-        v_next = v_last if t == ROLLOUT_STEPS - 1 else val_old[t + 1]
-        delta = rew[t] + GAMMA * v_next * nonterminal - val_old[t]
-        last_gae = delta + GAMMA * LAMBDA * nonterminal * last_gae
+
+def _compute_gae(rewards, values, dones, gamma: float, lam: float):
+    """
+    GAE-Lambda.
+    Here rewards are sparse (0 until terminal, then +1 for winner move).
+    We'll compute advantages per timestep.
+    """
+    T = rewards.shape[0]
+    adv = torch.zeros_like(rewards)
+    last_gae = 0.0
+    next_value = 0.0
+    for t in reversed(range(T)):
+        nonterminal = 1.0 - dones[t]
+        delta = rewards[t] + gamma * next_value * nonterminal - values[t]
+        last_gae = delta + gamma * lam * nonterminal * last_gae
         adv[t] = last_gae
+        next_value = values[t]
+    returns = adv + values
+    return adv, returns
 
-    ret = adv + val_old
+
+def ppo_update(model, optimizer, batch: RolloutBatch):
+    """
+    PPO update on collected rollout.
+    NOTE: reward shaping:
+      env reward is for acting player only on terminal winning move (+1).
+      That is fine; policy learns to create terminal winning moves.
+      (If you want symmetric terminal reward for all prior moves, we'd add outcome backfilling.)
+    """
+    obs = batch.obs
+    actions = batch.actions
+    old_logp = batch.logp
+    old_values = batch.values
+    rewards = batch.rewards
+    dones = batch.dones
+
+    # Normalize advantages
+    adv, returns = _compute_gae(rewards, old_values, dones, GAMMA, GAE_LAMBDA)
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    return obs, act, mask, logp_old, ret, adv
+    N = obs.shape[0]
+    idx = torch.arange(N, device=obs.device)
 
+    for _ in range(PPO_EPOCHS):
+        perm = idx[torch.randperm(N)]
+        for start in range(0, N, MINIBATCH_SIZE):
+            mb = perm[start:start + MINIBATCH_SIZE]
 
-def ppo_update(model: ActorCritic, optimizer, batch):
-    """PPO clipped objective update."""
-    obs, act, mask, logp_old, ret, adv = batch
-    T = obs.shape[0]
-    idxs = np.arange(T)
-
-    for _ in range(EPOCHS):
-        np.random.shuffle(idxs)
-        for start in range(0, T, MINIBATCH):
-            mb = idxs[start : start + MINIBATCH]
-
-            logits, v = model(obs[mb])
-            probs = masked_softmax(logits, mask[mb])
-
-            # Safety: any rows with no legal actions -> uniform
-            row_sums = mask[mb].sum(dim=-1, keepdim=True)
-            bad = row_sums <= 0
-            if bad.any():
-                probs = torch.where(bad, torch.full_like(probs, 1.0 / probs.shape[-1]), probs)
-
+            logits, values = model(obs[mb])
+            # build legal mask from obs by reconstructing empties:
+            # obs format: 16 cells + current_player; empty cell => 0
+            cells = obs[mb, :ACT_DIM]
+            mask = (cells == 0.0).float()  # empty => legal
+            probs = masked_softmax(logits, mask)
             dist = torch.distributions.Categorical(probs=probs)
-            logp = dist.log_prob(act[mb])
 
-            ratio = torch.exp(logp - logp_old[mb])
+            logp = dist.log_prob(actions[mb])
+            entropy = dist.entropy().mean()
+
+            ratio = torch.exp(logp - old_logp[mb])
             surr1 = ratio * adv[mb]
             surr2 = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv[mb]
-            pi_loss = -torch.mean(torch.min(surr1, surr2))
+            policy_loss = -torch.min(surr1, surr2).mean()
 
-            vf_loss = 0.5 * torch.mean((v - ret[mb]) ** 2)
-            ent = torch.mean(dist.entropy())
+            value_loss = F.mse_loss(values, returns[mb])
 
-            loss = pi_loss + VF_COEF * vf_loss - ENT_COEF * ent
+            loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
