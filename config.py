@@ -9,7 +9,7 @@ OBS_DIM = ACT_DIM + 1
 SEED = 0
 DEVICE = "cpu"
 
-NUM_UPDATES = 5        # 50 → 40 (더 빠르게)
+NUM_UPDATES = 40        # 50 → 40 (더 빠르게)
 ROLLOUT_STEPS = 512      # 충분히 빠름
 
 LR = 3e-4

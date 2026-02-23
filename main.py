@@ -80,7 +80,7 @@ def save_policy_games(model):
         table.set_fontsize(12)
         table.scale(1.2, 1.5)
 
-        filename = "policy_game_X.png" if start_player == 1 else "policy_game_O.png"
+        filename = "plot/policy_game_X.png" if start_player == 1 else "plot/policy_game_O.png"
         plt.savefig(filename, bbox_inches="tight")
         plt.close(fig)
 
