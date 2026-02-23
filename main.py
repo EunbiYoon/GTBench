@@ -1,13 +1,17 @@
 # main.py
-import csv
+# PPO self-play training + periodic evaluation vs TinyLlama
+# Prints progress at EVERY update.
 
+import csv
+import time
+
+import numpy as np
 import torch
 import torch.optim as optim
 
 from environment import TicTacToe4x4Env
 from agents import ActorCritic
 from train import collect_rollout, ppo_update
-from eval import eval_reward_and_regret
 from config import (
     OBS_DIM,
     ACT_DIM,
@@ -20,9 +24,10 @@ from config import (
     LOG_CSV,
 )
 
+from eval import eval_reward_and_regret_vs_tinyllama
+
 
 def set_seed(seed: int):
-    import numpy as np
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -32,7 +37,6 @@ def main():
     set_seed(SEED)
 
     env = TicTacToe4x4Env()
-
     model = ActorCritic(OBS_DIM, ACT_DIM).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
@@ -44,31 +48,62 @@ def main():
         w = csv.writer(f)
         w.writerow(["steps", "update", "episodes", "reward_p0", "reward_p1", "regret_p0", "regret_p1"])
 
-    # initial eval
-    r0, r1, g0, g1 = eval_reward_and_regret(TicTacToe4x4Env, model, DEVICE)
-    print(f"[init] steps=0 R_P0={r0:.4f} R_P1={r1:.4f} Reg_P0={g0:.4f} Reg_P1={g1:.4f}")
-    with open(LOG_CSV, "a", newline="") as f:
-        csv.writer(f).writerow([0, 0, episode_counter[0], r0, r1, g0, g1])
+    print("🚀 Training started")
+    start_time = time.time()
 
     for upd in range(1, NUM_UPDATES + 1):
+
+        # -------- Rollout --------
         batch = collect_rollout(
-            env, model, ACT_DIM, DEVICE, episode_counter,
-            debug_print_every_episode=0  # <- 원하면 100 같은 값으로, 100에피소드마다 보드 출력
-        )
+            env=env,
+            model=model,
+            act_dim=ACT_DIM,
+            device=DEVICE,
+            episode_counter_ref=episode_counter,
+)
+
         total_steps += ROLLOUT_STEPS
+
+        # -------- PPO Update --------
         ppo_update(model, optimizer, batch)
 
+        # -------- Progress Print (ALWAYS) --------
+        elapsed = time.time() - start_time
+        print(
+            f"[UPDATE {upd:03d}/{NUM_UPDATES}] "
+            f"steps={total_steps} "
+            f"episodes={episode_counter[0]} "
+            f"time={elapsed:.1f}s"
+        )
+
+        # -------- Periodic Evaluation --------
         if upd % EVAL_EVERY_UPDATES == 0:
-            r0, r1, g0, g1 = eval_reward_and_regret(TicTacToe4x4Env, model, DEVICE)
-            print(
-                f"[upd {upd:04d}] steps={total_steps} episodes={episode_counter[0]} "
-                f"R_P0={r0:.4f} R_P1={r1:.4f} Reg_P0={g0:.4f} Reg_P1={g1:.4f}"
+            r0, r1, g0, g1 = eval_reward_and_regret_vs_tinyllama(
+                env_cls=TicTacToe4x4Env,
+                model=model,
+                device=DEVICE,
+                act_dim=ACT_DIM,
+                episodes=5,            # fast eval
+                sims_per_action=3,
+                sims_baseline=5,
+                ollama_model="tinyllama:latest",
+                temperature=0.0,
+                timeout_sec=10.0,
+                policy_sample=False,
             )
+
+            print(
+                f"   📊 Eval → "
+                f"R_P0={r0:.3f} R_P1={r1:.3f} "
+                f"Reg_P0={g0:.3f} Reg_P1={g1:.3f}"
+            )
+
             with open(LOG_CSV, "a", newline="") as f:
                 csv.writer(f).writerow([total_steps, upd, episode_counter[0], r0, r1, g0, g1])
 
-    print(f"Saved training log to {LOG_CSV}")
-    print("Training done.")
+    print("✅ Training finished")
+    print(f"Total time: {time.time() - start_time:.1f}s")
+    print(f"Saved log to {LOG_CSV}")
 
 
 if __name__ == "__main__":

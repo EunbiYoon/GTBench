@@ -10,3 +10,4 @@ torch
 open_spiel
 matplotlib
 pokerkit
+requests

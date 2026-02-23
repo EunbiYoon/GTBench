@@ -1,8 +1,7 @@
 # plot.py
-import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
-
+from datetime import datetime
 
 def plot_from_csv(csv_path: str, output_path: str):
     df = pd.read_csv(csv_path)
@@ -30,8 +29,9 @@ def plot_from_csv(csv_path: str, output_path: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", type=str, required=True)
-    parser.add_argument("--out", type=str, default="learning_curve.png")
-    args = parser.parse_args()
-    plot_from_csv(args.csv, args.out)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    print(timestamp)
+    plot_path="plot/"+timestamp
+    log_path="log/"+timestamp
+    plot_from_csv(plot_path, log_path)
+
