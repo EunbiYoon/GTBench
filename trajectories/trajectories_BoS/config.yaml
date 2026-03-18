@@ -1,0 +1,77 @@
+model:
+  name: "/work/pi_dagarwal_umass_edu/project_16/vaikunth/models/qwen2.5-7b-instruct"
+  tensor_parallel_size: 1
+  max_tokens: 512
+  temperature: 0.8
+  top_p: 0.95
+  dtype: "auto"
+
+game:
+  # Battle of the Sexes payoffs
+  # Matrix:
+  #            Opera       Football
+  # Opera    (a, b)       (miss, miss)
+  # Football (miss, miss) (b, a)
+  a: 3          # P1's preferred payoff (both at Opera)
+  b: 2          # P2's preferred payoff (both at Football)
+  mismatch: 0   # payoff when players mismatch
+  rounds: 5     # rounds per trajectory episode
+
+opponents:
+  epsilon: 0.15   # prob of random deviation from opponent's type
+  types:
+    - name: "always_opera"
+      description: "Always chooses Opera regardless of history"
+      base_action: "Opera"
+      style: "fixed"
+
+    - name: "always_football"
+      description: "Always chooses Football regardless of history"
+      base_action: "Football"
+      style: "fixed"
+
+    - name: "tit_for_tat"
+      description: "Starts Opera, then mirrors P1's last action"
+      base_action: "Opera"
+      style: "tit_for_tat"
+
+    - name: "grudger"
+      description: "Cooperates (Opera) until P1 plays Football, then always Football"
+      base_action: "Opera"
+      style: "grudger"
+
+    - name: "initial_yielder"
+      description: "Yields to P1 for first 2 rounds (plays Opera), then defects to Football"
+      base_action: "Opera"
+      style: "initial_yielder"
+      yield_rounds: 2
+
+    - name: "majority_rule"
+      description: "Plays whichever action P1 played most often in history"
+      base_action: "Opera"
+      style: "majority_rule"
+
+generation:
+  trajectories_per_opponent: 20   # how many trajectories to generate per opponent type
+  p1_system_prompts:
+    - type: "nash_aware"
+      weight: 0.4
+    - type: "opponent_modeling"
+      weight: 0.4
+    - type: "baseline"
+      weight: 0.2
+
+scoring:
+  # Equilibrium alignment score weights
+  ne_coordination_weight: 0.5    # reward for landing on a pure NE
+  reasoning_depth_weight: 0.3    # reward for mentioning opponent, NE, coordination
+  payoff_weight: 0.2             # normalized cumulative payoff
+
+pairing:
+  top_pct: 0.25     # top X% become "chosen"
+  bottom_pct: 0.25  # bottom X% become "rejected"
+
+output:
+  trajectories_dir: "outputs/trajectories"
+  pairs_dir: "outputs/dpo_pairs"
+  logs_dir: "outputs/logs"
