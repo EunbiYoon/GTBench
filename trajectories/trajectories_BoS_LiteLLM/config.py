@@ -38,9 +38,9 @@ OPPONENT_TYPES = [
 
 # ── Scoring Configuration ──────────────────────────────────────────
 # Weights for final score (must sum to 1.0)
-WEIGHT_COORDINATION = 0.40
-WEIGHT_PAYOFF = 0.20
-WEIGHT_REASONING = 0.40
+WEIGHT_COORDINATION = 0.20
+WEIGHT_PAYOFF = 0.10
+WEIGHT_REASONING = 0.70
 
 # For normalizing payoff to 0-100 scale
 # Max possible payoff in 5 rounds: 3 * 5 = 15 (coordinate on Opera every round)

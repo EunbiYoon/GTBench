@@ -1,6 +1,11 @@
 """
 Agent (Player 1) that uses an LLM to play Battle of the Sexes.
 Uses Option (b): prompt includes game setup + history, agent reasons about opponent.
+
+Supports 3 reasoning levels:
+  Level 0 (Naive): No opponent model, maximizes single-round payoff
+  Level 1 (Fixed Belief): Simple belief about opponent, minimal adaptation
+  Level 2 (Adaptive): Full opponent modeling, pattern recognition, adaptation
 """
 
 import time
@@ -12,7 +17,47 @@ from config import (
 )
 
 
-AGENT_SYSTEM_PROMPT = """\
+AGENT_PROMPTS = {
+    "level_0": """\
+You are playing a repeated Battle of the Sexes game as Player 1. You prefer Opera.
+
+Payoff matrix:
+  If both choose Opera:    you get 3, opponent gets 2
+  If you choose Opera, opponent chooses Football:  both get 0
+  If you choose Football, opponent chooses Opera:  both get 0
+  If both choose Football: you get 2, opponent gets 3
+
+You are playing {num_rounds} rounds total. You want to maximize your payoff.
+
+Choose the action that gives you the highest possible payoff THIS round. \
+Do not overthink it. Pick the option with the best potential payoff and go with it.
+
+IMPORTANT: State your brief reasoning (1-2 sentences max), then your final line MUST be exactly one of:
+Action: Opera
+Action: Football
+""",
+
+    "level_1": """\
+You are playing a repeated Battle of the Sexes game as Player 1. You prefer Opera.
+
+Payoff matrix:
+  If both choose Opera:    you get 3, opponent gets 2
+  If you choose Opera, opponent chooses Football:  both get 0
+  If you choose Football, opponent chooses Opera:  both get 0
+  If both choose Football: you get 2, opponent gets 3
+
+You are playing {num_rounds} rounds total. You want to maximize your TOTAL payoff across all rounds.
+
+Before choosing, consider what your opponent did in previous rounds (if any). \
+Make a simple guess about what they will probably do this round based on what they did before. \
+Then pick your action accordingly.
+
+IMPORTANT: After your reasoning, your final line MUST be exactly one of:
+Action: Opera
+Action: Football
+""",
+
+    "level_2": """\
 You are playing a repeated Battle of the Sexes game as Player 1. You prefer Opera.
 
 Payoff matrix:
@@ -32,11 +77,32 @@ Before choosing your action each round, reason carefully about:
 IMPORTANT: After your reasoning, your final line MUST be exactly one of:
 Action: Opera
 Action: Football
-"""
+""",
+}
+
+AGENT_USER_PROMPTS = {
+    "level_0": "Pick your action for this round.",
+    "level_1": (
+        "Consider what your opponent has done so far, "
+        "make a guess about what they'll do, then choose your action."
+    ),
+    "level_2": (
+        "Think step by step about what your opponent is likely to do, "
+        "then choose your action."
+    ),
+}
+
+VALID_LEVELS = list(AGENT_PROMPTS.keys())
 
 
 class Agent:
-    def __init__(self):
+    def __init__(self, reasoning_level: str = "level_2"):
+        if reasoning_level not in VALID_LEVELS:
+            raise ValueError(
+                f"Unknown reasoning level: {reasoning_level}. "
+                f"Valid levels: {VALID_LEVELS}"
+            )
+        self.reasoning_level = reasoning_level
         self.client = OpenAI(
             base_url=LITELLM_BASE_URL,
             api_key=LITELLM_API_KEY,
@@ -49,7 +115,7 @@ class Agent:
           - "reasoning": the full chain-of-thought text
           - "raw_response": the complete LLM response
         """
-        system = AGENT_SYSTEM_PROMPT.format(num_rounds=NUM_ROUNDS)
+        system = AGENT_PROMPTS[self.reasoning_level].format(num_rounds=NUM_ROUNDS)
         user_prompt = self._build_user_prompt(history, round_num)
 
         try:
@@ -97,10 +163,7 @@ class Agent:
         else:
             prompt += "This is the first round. No history yet.\n\n"
 
-        prompt += (
-            "Think step by step about what your opponent is likely to do, "
-            "then choose your action."
-        )
+        prompt += AGENT_USER_PROMPTS[self.reasoning_level]
         return prompt
 
     def _parse_action(self, text: str) -> str:
