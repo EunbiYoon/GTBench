@@ -1,11 +1,17 @@
 """
 Main runner for Battle of the Sexes DPO trajectory generation.
-Processes per opponent type: generate → score → label → pair, then next opponent.
+
+Pipeline per opponent type:
+  1. Level_2 agent plays N live games against the opponent
+  2. At each round, level_0 responds to the same history (hypothetical)
+  3. DPO pairs formed: chosen = level_2, rejected = level_0
+  4. (Optional) Validate a sample with LLM judge
 
 Usage:
-    python main.py --mode test      # 1 trajectory per opponent per level
-    python main.py --mode prod      # 50 trajectories per opponent per level
-    python main.py --mode test --resume output/run_XXXX/raw_trajectories.json
+    python main.py --mode test                    # 1 game per opponent
+    python main.py --mode prod                    # 15 games per opponent
+    python main.py --mode test --validate         # with validation scoring
+    python main.py --mode test --validate-only output/run_XXX/raw_games.json
 """
 
 import argparse
@@ -15,116 +21,36 @@ import time
 from datetime import datetime
 
 from config import (
-    OPPONENT_TYPES,
-    TRAJECTORIES_PER_OPPONENT_TEST,
-    TRAJECTORIES_PER_OPPONENT_PROD,
+    OPPONENT_TYPES, GAMES_PER_OPPONENT_TEST, GAMES_PER_OPPONENT_PROD, NUM_ROUNDS,
 )
-from agent import Agent, VALID_LEVELS
 from opponents import get_opponent
-from game_engine import run_game
-from scoring import compute_final_score
-from labeling import (
-    label_trajectories,
-    build_dpo_base_prompt,
-    format_trajectory_as_dpo_prompt,
-)
-
-
-def generate_trajectories_for_opponent(opp_type: str, num_per_level: int, game_counter: int, total_games: int) -> tuple[list[dict], int]:
-    """Generate trajectories for one opponent type across all reasoning levels."""
-    trajectories = []
-
-    for level in VALID_LEVELS:
-        print(f"\n  --- Reasoning Level: {level} ---")
-        agent = Agent(reasoning_level=level)
-
-        for i in range(num_per_level):
-            game_counter += 1
-            game_id = f"{opp_type}_{level}_{i}"
-            print(f"\n  Game {game_counter}/{total_games}: {game_id}")
-
-            opponent = get_opponent(opp_type)
-            trajectory = run_game(agent, opponent, game_id=game_id)
-            trajectory["reasoning_level"] = level
-            trajectories.append(trajectory)
-
-    return trajectories, game_counter
-
-
-def score_trajectories(trajectories: list[dict], label: str = "") -> list[dict]:
-    """Score a list of trajectories."""
-    scored = []
-    for i, traj in enumerate(trajectories):
-        prefix = f"[{label}] " if label else ""
-        print(f"\n  {prefix}Scoring {i + 1}/{len(trajectories)}: {traj['game_id']}...")
-        scores = compute_final_score(traj)
-        scored.append({
-            "trajectory": traj,
-            "scores": scores,
-        })
-        print(
-            f"    Coordination: {scores['coordination_score']}, "
-            f"Payoff: {scores['payoff_score']}, "
-            f"Reasoning: {scores['reasoning_score']}, "
-            f"FINAL: {scores['final_score']}"
-        )
-    return scored
-
-
-def form_dpo_pairs_for_opponent(labeled_data: dict, opp_type: str) -> list[dict]:
-    """
-    Form DPO pairs from labeled trajectories for a single opponent type.
-    Pairs each preferred trajectory with each non-preferred trajectory.
-    """
-    base_prompt = build_dpo_base_prompt()
-    preferred = labeled_data["preferred"]
-    non_preferred = labeled_data["non_preferred"]
-    pairs = []
-
-    for pref in preferred:
-        for non_pref in non_preferred:
-            pair = {
-                "prompt": base_prompt,
-                "chosen": format_trajectory_as_dpo_prompt(pref["trajectory"]),
-                "rejected": format_trajectory_as_dpo_prompt(non_pref["trajectory"]),
-                "metadata": {
-                    "opponent_type": opp_type,
-                    "chosen_reasoning_level": pref["trajectory"].get("reasoning_level", "unknown"),
-                    "rejected_reasoning_level": non_pref["trajectory"].get("reasoning_level", "unknown"),
-                    "chosen_score": pref["scores"]["final_score"],
-                    "rejected_score": non_pref["scores"]["final_score"],
-                    "chosen_game_id": pref["trajectory"]["game_id"],
-                    "rejected_game_id": non_pref["trajectory"]["game_id"],
-                },
-            }
-            pairs.append(pair)
-
-    return pairs
+from game_engine import run_game_and_collect_dpo
+from scoring import validate_game
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BoS DPO Trajectory Generator")
+    parser = argparse.ArgumentParser(description="BoS DPO Data Generator")
     parser.add_argument(
-        "--mode",
-        choices=["test", "prod"],
-        default="test",
-        help="test = small run, prod = full run",
+        "--mode", choices=["test", "prod"], default="test",
+        help="test = 1 game/opponent, prod = 15 games/opponent",
     )
     parser.add_argument(
-        "--output-dir",
-        default="output",
+        "--output-dir", default="output",
         help="Directory to save results",
     )
     parser.add_argument(
-        "--resume",
-        default=None,
-        help="Path to existing raw_trajectories.json to resume from scoring phase",
+        "--validate", action="store_true",
+        help="Run validation scoring on generated data",
+    )
+    parser.add_argument(
+        "--validate-only", default=None,
+        help="Path to existing raw_games.json — skip generation, only run validation",
     )
     args = parser.parse_args()
 
-    num_per_level = (
-        TRAJECTORIES_PER_OPPONENT_TEST if args.mode == "test"
-        else TRAJECTORIES_PER_OPPONENT_PROD
+    num_games = (
+        GAMES_PER_OPPONENT_TEST if args.mode == "test"
+        else GAMES_PER_OPPONENT_PROD
     )
 
     # Create output directory
@@ -132,165 +58,172 @@ def main():
     output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
-    total_games = num_per_level * len(OPPONENT_TYPES) * len(VALID_LEVELS)
+    total_games = num_games * len(OPPONENT_TYPES)
+    total_dpo_pairs = total_games * NUM_ROUNDS
 
     print(f"Mode: {args.mode}")
-    print(f"Trajectories per opponent per level: {num_per_level}")
-    print(f"Reasoning levels: {VALID_LEVELS}")
+    print(f"Games per opponent: {num_games}")
     print(f"Opponent types: {OPPONENT_TYPES}")
     print(f"Total games: {total_games}")
+    print(f"Expected DPO pairs: {total_dpo_pairs}")
     print(f"Output directory: {output_dir}")
+    print(f"Validation: {'yes' if args.validate else 'no'}")
 
-    # ── Handle resume ──────────────────────────────────────────────
-    if args.resume:
-        print(f"\nResuming from {args.resume} — skipping generation, running scoring + labeling per opponent.")
-        with open(args.resume, "r") as f:
-            all_trajectories = json.load(f)
-        print(f"Loaded {len(all_trajectories)} trajectories")
-
-        # Group by opponent type
-        trajs_by_opp = {}
-        for t in all_trajectories:
-            opp = t["opponent_type"]
-            if opp not in trajs_by_opp:
-                trajs_by_opp[opp] = []
-            trajs_by_opp[opp].append(t)
-
+    # ── Load or generate ───────────────────────────────────────────
+    if args.validate_only:
+        print(f"\nLoading from {args.validate_only}...")
+        with open(args.validate_only, "r") as f:
+            all_games = json.load(f)
+        print(f"Loaded {len(all_games)} games")
         gen_time = 0.0
     else:
-        trajs_by_opp = None  # will be built during generation
+        all_games = []
+        game_counter = 0
+        gen_start = time.time()
 
-    # ── Per-opponent pipeline ──────────────────────────────────────
-    all_trajectories = []
-    all_scored = []
-    all_dpo_pairs = []
-    all_labeled_data = {}
-    game_counter = 0
-    gen_time = 0.0
-    score_time = 0.0
+        for opp_type in OPPONENT_TYPES:
+            print(f"\n{'='*60}")
+            print(f"OPPONENT: {opp_type}")
+            print(f"{'='*60}")
 
-    for opp_type in OPPONENT_TYPES:
-        print(f"\n{'='*60}")
-        print(f"OPPONENT: {opp_type}")
-        print(f"{'='*60}")
+            for i in range(num_games):
+                game_counter += 1
+                game_id = f"{opp_type}_{i}"
+                print(f"\n  Game {game_counter}/{total_games}: {game_id}")
 
-        # ── Generate (or load) trajectories for this opponent ──────
-        if trajs_by_opp is not None:
-            # Resume mode: use loaded trajectories
-            opp_trajectories = trajs_by_opp.get(opp_type, [])
-            print(f"  Loaded {len(opp_trajectories)} trajectories from file")
-        else:
-            # Generate fresh
-            print(f"\n  Generating trajectories...")
-            start = time.time()
-            opp_trajectories, game_counter = generate_trajectories_for_opponent(
-                opp_type, num_per_level, game_counter, total_games
-            )
-            elapsed = time.time() - start
-            gen_time += elapsed
-            print(f"  Generated {len(opp_trajectories)} trajectories in {elapsed:.1f}s")
+                opponent = get_opponent(opp_type)
+                game_data = run_game_and_collect_dpo(opponent, game_id=game_id)
+                all_games.append(game_data)
 
-        all_trajectories.extend(opp_trajectories)
+        gen_time = time.time() - gen_start
+        print(f"\nGenerated {len(all_games)} games in {gen_time:.1f}s")
 
-        # ── Score trajectories for this opponent ───────────────────
-        print(f"\n  Scoring trajectories for {opp_type}...")
-        start = time.time()
-        scored = score_trajectories(opp_trajectories, label=opp_type)
-        elapsed = time.time() - start
-        score_time += elapsed
-        all_scored.extend(scored)
+        # Save raw games
+        raw_path = os.path.join(output_dir, "raw_games.json")
+        with open(raw_path, "w") as f:
+            json.dump(all_games, f, indent=2)
+        print(f"Saved raw games to {raw_path}")
 
-        # ── Label: top 25% preferred, bottom 25% non-preferred ─────
-        print(f"\n  Labeling trajectories for {opp_type}...")
-        labeled = label_trajectories(scored)
-        stats = labeled["stats"]
-        print(f"    Total: {stats['total_trajectories']}")
-        print(f"    Preferred: {stats['num_preferred']} (scores: {stats['preferred_score_range']})")
-        print(f"    Non-preferred: {stats['num_non_preferred']} (scores: {stats['non_preferred_score_range']})")
-        print(f"    Unlabeled: {stats['num_unlabeled']}")
-        all_labeled_data[opp_type] = labeled
-
-        # ── Form DPO pairs for this opponent ───────────────────────
-        pairs = form_dpo_pairs_for_opponent(labeled, opp_type)
-        all_dpo_pairs.extend(pairs)
-        print(f"    DPO pairs formed: {len(pairs)}")
-
-    # ── Save all outputs ──────────────────────────────────────────
+    # ── Extract DPO pairs ──────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("SAVING OUTPUTS")
+    print("EXTRACTING DPO PAIRS")
     print(f"{'='*60}")
 
-    # Raw trajectories
-    raw_path = os.path.join(output_dir, "raw_trajectories.json")
-    with open(raw_path, "w") as f:
-        json.dump(all_trajectories, f, indent=2)
-    print(f"  Raw trajectories: {raw_path}")
+    dpo_pairs = []
+    for game in all_games:
+        for round_data in game["rounds"]:
+            pair = {
+                "prompt": round_data["dpo_prompt"],
+                "chosen": (
+                    f"{round_data['chosen']['reasoning']}\n"
+                    f"Action: {round_data['chosen']['action']}"
+                ),
+                "rejected": (
+                    f"{round_data['rejected']['reasoning']}\n"
+                    f"Action: {round_data['rejected']['action']}"
+                ),
+                "metadata": {
+                    "game_id": game["game_id"],
+                    "opponent_type": game["opponent_type"],
+                    "round_num": round_data["round_num"],
+                    "chosen_action": round_data["chosen"]["action"],
+                    "rejected_action": round_data["rejected"]["action"],
+                    "canonical_action": round_data["canonical_action"],
+                    "opponent_action": round_data["opponent_action"],
+                },
+            }
+            dpo_pairs.append(pair)
 
-    # Scored trajectories
-    scored_path = os.path.join(output_dir, "scored_trajectories.json")
-    with open(scored_path, "w") as f:
-        json.dump(all_scored, f, indent=2)
-    print(f"  Scored trajectories: {scored_path}")
-
-    # Labeled data (per opponent type)
-    labeled_path = os.path.join(output_dir, "labeled_trajectories.json")
-    with open(labeled_path, "w") as f:
-        # Convert to serializable format
-        serializable = {}
-        for opp, data in all_labeled_data.items():
-            serializable[opp] = data
-        json.dump(serializable, f, indent=2)
-    print(f"  Labeled trajectories: {labeled_path}")
-
-    # DPO pairs (JSONL)
+    # Save DPO pairs
     dpo_path = os.path.join(output_dir, "dpo_pairs.jsonl")
     with open(dpo_path, "w") as f:
-        for pair in all_dpo_pairs:
+        for pair in dpo_pairs:
             f.write(json.dumps(pair) + "\n")
-    print(f"  DPO pairs: {dpo_path} ({len(all_dpo_pairs)} pairs)")
+    print(f"Exported {len(dpo_pairs)} DPO pairs to {dpo_path}")
+
+    # ── Optional validation ────────────────────────────────────────
+    if args.validate or args.validate_only:
+        print(f"\n{'='*60}")
+        print("VALIDATION SCORING")
+        print(f"{'='*60}")
+
+        # In test mode validate all, in prod validate a sample
+        games_to_validate = all_games
+        if args.mode == "prod" and not args.validate_only:
+            # Sample 1 game per opponent type for validation
+            seen_opps = set()
+            games_to_validate = []
+            for g in all_games:
+                if g["opponent_type"] not in seen_opps:
+                    games_to_validate.append(g)
+                    seen_opps.add(g["opponent_type"])
+
+        print(f"Validating {len(games_to_validate)} games...")
+
+        validation_results = []
+        for game in games_to_validate:
+            print(f"\n    Validating game: {game['game_id']}")
+            result = validate_game(game)
+            validation_results.append(result)
+            print(
+                f"      Chosen avg: {result['chosen_avg_score']:.1f}, "
+                f"Rejected avg: {result['rejected_avg_score']:.1f}, "
+                f"Chosen win rate: {result['chosen_win_rate']:.0%}"
+            )
+
+        # Save validation results
+        val_path = os.path.join(output_dir, "validation_results.json")
+        with open(val_path, "w") as f:
+            json.dump(validation_results, f, indent=2)
+        print(f"\nSaved validation results to {val_path}")
+
+        # Validation summary
+        all_chosen_avgs = [r["chosen_avg_score"] for r in validation_results]
+        all_rejected_avgs = [r["rejected_avg_score"] for r in validation_results]
+        all_win_rates = [r["chosen_win_rate"] for r in validation_results]
+
+        print(f"\n  Validation Summary:")
+        print(f"    Chosen avg score:  {sum(all_chosen_avgs)/len(all_chosen_avgs):.1f}")
+        print(f"    Rejected avg score: {sum(all_rejected_avgs)/len(all_rejected_avgs):.1f}")
+        print(f"    Chosen win rate:   {sum(all_win_rates)/len(all_win_rates):.0%}")
+
+        print(f"\n  Per opponent type:")
+        for r in validation_results:
+            print(
+                f"    {r['opponent_type']}: "
+                f"chosen={r['chosen_avg_score']:.1f}, "
+                f"rejected={r['rejected_avg_score']:.1f}, "
+                f"win_rate={r['chosen_win_rate']:.0%}"
+            )
 
     # ── Summary ───────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  Total trajectories: {len(all_trajectories)}")
-    print(f"  Total DPO pairs: {len(all_dpo_pairs)}")
+    print(f"  Total games: {len(all_games)}")
+    print(f"  Total DPO pairs: {len(dpo_pairs)}")
     print(f"  Generation time: {gen_time:.1f}s")
-    print(f"  Scoring time: {score_time:.1f}s")
     print(f"  Output directory: {output_dir}")
 
-    # Score distribution by opponent type
-    print("\n  Score distribution by opponent type:")
+    # Per opponent breakdown
+    print(f"\n  Per opponent type:")
     by_opp = {}
-    for st in all_scored:
-        opp = st["trajectory"]["opponent_type"]
+    for game in all_games:
+        opp = game["opponent_type"]
         if opp not in by_opp:
-            by_opp[opp] = []
-        by_opp[opp].append(st["scores"]["final_score"])
-    for opp, scores in sorted(by_opp.items()):
-        avg = sum(scores) / len(scores)
-        print(f"    {opp}: avg={avg:.1f}, min={min(scores):.1f}, max={max(scores):.1f}")
+            by_opp[opp] = {"games": 0, "pairs": 0, "total_payoff": 0, "total_coord": 0}
+        by_opp[opp]["games"] += 1
+        by_opp[opp]["pairs"] += len(game["rounds"])
+        by_opp[opp]["total_payoff"] += game["total_agent_payoff"]
+        by_opp[opp]["total_coord"] += game["coordination_count"]
 
-    # Score distribution by reasoning level
-    print("\n  Score distribution by reasoning level:")
-    by_level = {}
-    for st in all_scored:
-        level = st["trajectory"].get("reasoning_level", "unknown")
-        if level not in by_level:
-            by_level[level] = []
-        by_level[level].append(st["scores"]["final_score"])
-    for level, scores in sorted(by_level.items()):
-        avg = sum(scores) / len(scores)
-        print(f"    {level}: avg={avg:.1f}, min={min(scores):.1f}, max={max(scores):.1f}")
-
-    # DPO pairs by opponent type
-    print("\n  DPO pairs by opponent type:")
-    pairs_by_opp = {}
-    for p in all_dpo_pairs:
-        opp = p["metadata"]["opponent_type"]
-        pairs_by_opp[opp] = pairs_by_opp.get(opp, 0) + 1
-    for opp, count in sorted(pairs_by_opp.items()):
-        print(f"    {opp}: {count} pairs")
+    for opp, stats in sorted(by_opp.items()):
+        avg_payoff = stats["total_payoff"] / stats["games"]
+        avg_coord = stats["total_coord"] / stats["games"]
+        print(
+            f"    {opp}: {stats['games']} games, {stats['pairs']} pairs, "
+            f"avg_payoff={avg_payoff:.1f}, avg_coord={avg_coord:.1f}/{NUM_ROUNDS}"
+        )
 
 
 if __name__ == "__main__":

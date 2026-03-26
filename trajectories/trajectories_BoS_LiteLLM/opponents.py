@@ -5,6 +5,7 @@ Scripted opponents have epsilon-noise for diversity.
 """
 
 import random
+import re
 import time
 from openai import OpenAI
 from config import (
@@ -21,25 +22,19 @@ def apply_epsilon_noise(intended_action: str, epsilon: float = EPSILON) -> str:
 
 
 class AlwaysOpera:
-    """Always plays Opera (regardless of history)."""
     name = "AlwaysOpera"
-
     def choose_action(self, history: list[dict]) -> str:
         return apply_epsilon_noise("Opera")
 
 
 class AlwaysFootball:
-    """Always plays Football (regardless of history)."""
     name = "AlwaysFootball"
-
     def choose_action(self, history: list[dict]) -> str:
         return apply_epsilon_noise("Football")
 
 
 class Alternator:
-    """Alternates between Opera and Football. Starts with Opera."""
     name = "Alternator"
-
     def choose_action(self, history: list[dict]) -> str:
         round_num = len(history)
         intended = "Opera" if round_num % 2 == 0 else "Football"
@@ -47,21 +42,14 @@ class Alternator:
 
 
 class RandomOpponent:
-    """Plays uniformly at random each round."""
     name = "Random"
-
     def choose_action(self, history: list[dict]) -> str:
-        # No epsilon noise needed — already random
         return random.choice(ACTIONS)
 
 
 class ConditionalCooperator:
-    """
-    Matches the agent's last action. Round 1: plays Opera.
-    'Cooperates' by going along with whatever the agent did last.
-    """
+    """Matches the agent's last action. Round 1: plays Opera."""
     name = "ConditionalCooperator"
-
     def choose_action(self, history: list[dict]) -> str:
         if len(history) == 0:
             return apply_epsilon_noise("Opera")
@@ -70,9 +58,7 @@ class ConditionalCooperator:
 
 
 class LLMOpponent:
-    """
-    An LLM playing as Player 2 (prefers Football) via the LiteLLM endpoint.
-    """
+    """An LLM playing as Player 2 (prefers Football)."""
     name = "LLM"
 
     def __init__(self):
@@ -135,40 +121,29 @@ class LLMOpponent:
         return "\n".join(lines)
 
     def _parse_action(self, text: str) -> str:
-        """Extract the action from the LLM response."""
-        import re
         lower_text = text.lower()
-
-        # Look for "Action: X" anywhere (with optional markdown bold)
         action_matches = re.findall(
-            r'\*{0,2}action\s*:\*{0,2}\s*(opera|football)',
-            lower_text
+            r'\*{0,2}action\s*:\*{0,2}\s*(opera|football)', lower_text
         )
         if action_matches:
             return "Opera" if action_matches[-1] == "opera" else "Football"
-
-        # Look for "I'll play/choose X" or "my choice is X"
         play_matches = re.findall(
             r"(?:i'?ll\s+(?:play|choose)|my\s+(?:choice|action)\s+is|i\s+(?:play|choose))\s+\*{0,2}(opera|football)",
             lower_text
         )
         if play_matches:
             return "Opera" if play_matches[-1] == "opera" else "Football"
-
-        # Fallback: look for the last mention of opera/football in the text
         last_opera = lower_text.rfind("opera")
         last_football = lower_text.rfind("football")
         if last_opera > last_football and last_opera != -1:
             return "Opera"
         elif last_football > last_opera and last_football != -1:
             return "Football"
-
         print(f"  [LLMOpponent] Could not parse action from: {text[:100]}. Falling back to random.")
         return random.choice(ACTIONS)
 
 
 def get_opponent(opponent_type: str):
-    """Factory function to get an opponent instance by type name."""
     opponents = {
         "AlwaysOpera": AlwaysOpera,
         "AlwaysFootball": AlwaysFootball,
@@ -178,5 +153,5 @@ def get_opponent(opponent_type: str):
         "LLM": LLMOpponent,
     }
     if opponent_type not in opponents:
-        raise ValueError(f"Unknown opponent type: {opponent_type}. Available: {list(opponents.keys())}")
+        raise ValueError(f"Unknown opponent type: {opponent_type}")
     return opponents[opponent_type]()

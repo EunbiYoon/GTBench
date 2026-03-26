@@ -36,29 +36,23 @@ OPPONENT_TYPES = [
     "LLM",
 ]
 
-# ── Scoring Configuration ──────────────────────────────────────────
+# ── Scoring Configuration (for optional validation) ────────────────
 # Weights for final score (must sum to 1.0)
 WEIGHT_COORDINATION = 0.20
 WEIGHT_PAYOFF = 0.10
 WEIGHT_REASONING = 0.70
 
 # For normalizing payoff to 0-100 scale
-# Max possible payoff in 5 rounds: 3 * 5 = 15 (coordinate on Opera every round)
-# Min possible payoff: 0 (miscoordinate every round)
 MAX_PAYOFF = NUM_ROUNDS * 3
 MIN_PAYOFF = 0
 
 # For normalizing coordination to 0-100 scale
-MAX_COORDINATION = NUM_ROUNDS  # coordinate every round
+MAX_COORDINATION = NUM_ROUNDS
 MIN_COORDINATION = 0
 
 # ── Data Generation Configuration ──────────────────────────────────
-TRAJECTORIES_PER_OPPONENT_TEST = 2
-TRAJECTORIES_PER_OPPONENT_PROD = 50
-
-# Top/bottom percentile for labeling preferred/non-preferred
-LABEL_TOP_PERCENTILE = 25  # top 25% = preferred
-LABEL_BOTTOM_PERCENTILE = 25  # bottom 25% = non-preferred
+GAMES_PER_OPPONENT_TEST = 1
+GAMES_PER_OPPONENT_PROD = 15
 
 # ── Rate Limiting ──────────────────────────────────────────────────
-REQUEST_DELAY_SECONDS = 1.0  # delay between API calls to avoid rate limits
+REQUEST_DELAY_SECONDS = 1.0
