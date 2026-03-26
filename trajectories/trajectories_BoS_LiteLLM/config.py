@@ -51,8 +51,20 @@ MAX_COORDINATION = NUM_ROUNDS
 MIN_COORDINATION = 0
 
 # ── Data Generation Configuration ──────────────────────────────────
+# Per-opponent game counts for production
+# Deterministic opponents (predictable after a few games): fewer games
+# Stochastic opponents (Random, LLM): more games for diversity
+GAMES_PER_OPPONENT_PROD = {
+    "AlwaysOpera": 3,
+    "AlwaysFootball": 3,
+    "Alternator": 3,
+    "ConditionalCooperator": 3,
+    "Random": 10,
+    "LLM": 10,
+}
+
+# Test mode: 1 game per opponent regardless
 GAMES_PER_OPPONENT_TEST = 1
-GAMES_PER_OPPONENT_PROD = 15
 
 # ── Rate Limiting ──────────────────────────────────────────────────
 REQUEST_DELAY_SECONDS = 1.0

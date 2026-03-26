@@ -48,21 +48,24 @@ def main():
     )
     args = parser.parse_args()
 
-    num_games = (
-        GAMES_PER_OPPONENT_TEST if args.mode == "test"
-        else GAMES_PER_OPPONENT_PROD
-    )
+    def get_num_games(opp_type):
+        if args.mode == "test":
+            return GAMES_PER_OPPONENT_TEST
+        return GAMES_PER_OPPONENT_PROD.get(opp_type, 3)
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
-    total_games = num_games * len(OPPONENT_TYPES)
+    total_games = sum(get_num_games(opp) for opp in OPPONENT_TYPES)
     total_dpo_pairs = total_games * NUM_ROUNDS
 
     print(f"Mode: {args.mode}")
-    print(f"Games per opponent: {num_games}")
+    if args.mode == "prod":
+        print(f"Games per opponent: {GAMES_PER_OPPONENT_PROD}")
+    else:
+        print(f"Games per opponent: {GAMES_PER_OPPONENT_TEST} (test mode)")
     print(f"Opponent types: {OPPONENT_TYPES}")
     print(f"Total games: {total_games}")
     print(f"Expected DPO pairs: {total_dpo_pairs}")
@@ -82,8 +85,9 @@ def main():
         gen_start = time.time()
 
         for opp_type in OPPONENT_TYPES:
+            num_games = get_num_games(opp_type)
             print(f"\n{'='*60}")
-            print(f"OPPONENT: {opp_type}")
+            print(f"OPPONENT: {opp_type} ({num_games} games)")
             print(f"{'='*60}")
 
             for i in range(num_games):
