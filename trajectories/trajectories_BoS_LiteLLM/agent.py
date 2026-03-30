@@ -26,9 +26,9 @@ Payoff matrix:
   You: Football, Opponent: Opera: both get 0
   Both choose Football: you get 2, opponent gets 3
 
-You want to maximize your payoff. Choose the action that gives you the highest \
-possible payoff THIS round. Do not overthink it. Pick the option with the best \
-potential payoff and go with it.
+You want to maximize your payoff. Look at what happened in previous rounds and \
+make a quick gut decision. Don't analyze too deeply — just pick what feels right \
+based on the immediate situation. Keep it simple.
 
 IMPORTANT: State your brief reasoning (1-2 sentences max), then your final line \
 MUST be exactly one of:
